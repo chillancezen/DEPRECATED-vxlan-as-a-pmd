@@ -35,21 +35,24 @@ struct vxlan_pmd_internal{
 	uint32_t local_ip_as_be;
 	uint32_t remote_ip_as_be;
 };
+#if 0
 #define DEFAULT_RX_DESCRIPTORS 1024
 #define DEFAULT_TX_DESCRIPTORS 1024
 #define VXLAN_PMD_MEMPOOL_NR (1024*8)
 #define VXLAN_PMD_MEMPOOL_CACHE_SIZE 256
+#endif
 
 #define VXLAN_PMD_ARG_UNDERLAY_DEV "underlay_dev"
 #define VXLAN_PMD_ARG_LOCAL_IP "local_ip"
 #define VXLAN_PMD_ARG_REMOTE_IP "remote_ip"
 #define VXLAN_PMD_ARG_UNDERLAY_VLAN "underlay_vlan" /*optional,default is 0*/
+
 static uint16_t pmd_mac_counter=0x1;
+
 /*here for security reason, we do not create per-device mempool
 since it's possible when the packet from mempool is being processed while the device is releasing
 which may involves releasing its relavant mempool,thus leading errors maybe*/
-struct rte_mempool * g_vxlan_pmd_pktpool=NULL;
-
+/*struct rte_mempool * g_vxlan_pmd_pktpool=NULL;*/
 
 static const char * valid_arguments[]={
 	VXLAN_PMD_ARG_UNDERLAY_VLAN,
@@ -66,10 +69,126 @@ static struct rte_eth_link vxlan_pmd_link = {
 	.link_autoneg = ETH_LINK_SPEED_AUTONEG,
 };
 
+static int vxlan_pmd_device_start(struct rte_eth_dev * dev)
+{
+	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)dev->data->dev_private;
+	rte_eth_dev_start(internals->underlay_port);
+	return 0;
+}
+static void vxlan_pmd_device_stop(struct rte_eth_dev * dev)
+{
+	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)dev->data->dev_private;
+	rte_eth_dev_stop(internals->underlay_port);
+}
+static int vxlan_pmd_device_configure(struct rte_eth_dev *dev)
+{
+	int rc;
+	struct rte_eth_conf port_conf;
+	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)dev->data->dev_private;
+	memset(&port_conf,0x0,sizeof(struct rte_eth_conf));
+	port_conf.rxmode.mq_mode=ETH_MQ_RX_NONE;
+	port_conf.rxmode.max_rx_pkt_len=ETHER_MAX_LEN;
+	port_conf.rxmode.hw_ip_checksum=1;
+	port_conf.rxmode.hw_vlan_strip=1;
+	rc=rte_eth_dev_configure(internals->underlay_port,1,1,&port_conf);
+	if(rc<0){
+		VXLAN_PMD_LOG("can not configure underlay port %d\n",internals->underlay_port);
+		return -1;
+	}
+	return 0;
+}
+static void vxlan_pmd_device_info_get(struct rte_eth_dev *dev __rte_unused,struct rte_eth_dev_info *dev_info)
+{
+	//memset(dev_info,0x0,sizeof(struct rte_eth_dev_info));
+	dev_info->max_mac_addrs=1;
+	dev_info->max_rx_pktlen=(uint32_t) -1;
+	dev_info->max_rx_queues=1;
+	dev_info->max_tx_queues=1;
+	dev_info->min_rx_bufsize=0;
+	dev_info->rx_offload_capa=0;
+	dev_info->tx_offload_capa=0;
+}
+static int vxlan_pmd_rx_queue_setup(struct rte_eth_dev *dev, 
+			uint16_t rx_queue_id,
+			uint16_t nb_rx_desc,
+			unsigned int socket_id,
+			const struct rte_eth_rxconf *rx_conf,
+			struct rte_mempool *mb_pool)
+{
+	int rc;
+	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)dev->data->dev_private;
+	if(rx_queue_id)
+		return -1;
+	rc=rte_eth_rx_queue_setup(internals->underlay_port,
+				rx_queue_id,
+				nb_rx_desc,
+				socket_id,
+				rx_conf,
+				mb_pool);
+	if(rc<0){
+		VXLAN_PMD_LOG("can not setup rx queue for underlay port %d\n",internals->underlay_port);
+		return -1;
+	}
+	dev->data->rx_queues[0]=internals;
+	return 0;
+}
+static int vxlan_pmd_tx_queue_setup(struct rte_eth_dev *dev,
+			uint16_t tx_queue_id,
+			uint16_t nb_tx_desc,
+			unsigned int socket_id,
+			const struct rte_eth_txconf *tx_conf __rte_unused)
+{
+	int rc;
+	struct rte_eth_dev_info dev_info;
+	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)dev->data->dev_private;
+	if(tx_queue_id)
+		return -1;
+	rte_eth_dev_info_get(internals->underlay_port,&dev_info);
+	dev_info.default_txconf.txq_flags=0;
+	rc=rte_eth_tx_queue_setup(internals->underlay_port,
+				tx_queue_id,
+				nb_tx_desc,
+				socket_id,
+				&dev_info.default_txconf);
+	if(rc<0){
+		VXLAN_PMD_LOG("can not setup tx queue for underlay port %d\n",internals->underlay_port);
+		return -1;
+	}
+	dev->data->tx_queues[0]=internals;
+	return 0;
+}
+static int vxlan_pmd_link_update(struct rte_eth_dev *dev __rte_unused,
+				int wait_to_complete __rte_unused) 
+{ 
+	return 0;
+}
+static void vxlan_pmd_stats_get(struct rte_eth_dev *dev, struct rte_eth_stats *igb_stats)
+{
+	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)dev->data->dev_private;
+	/*todo: count our own stats later*/
+	rte_eth_stats_get(internals->underlay_port,igb_stats);
+}
+static void vxlan_pmd_stats_reset(struct rte_eth_dev *dev)
+{
+	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)dev->data->dev_private;
+	rte_eth_stats_reset(internals->underlay_port);
+}
+
+static struct eth_dev_ops dev_ops={
+	.dev_start=vxlan_pmd_device_start,
+	.dev_stop=vxlan_pmd_device_stop,
+	.dev_configure=vxlan_pmd_device_configure,
+	.dev_infos_get=vxlan_pmd_device_info_get,
+	.rx_queue_setup=vxlan_pmd_rx_queue_setup,
+	.tx_queue_setup=vxlan_pmd_tx_queue_setup,
+	.link_update=vxlan_pmd_link_update,
+	.stats_get=vxlan_pmd_stats_get,
+	.stats_reset=vxlan_pmd_stats_reset,
+	
+};
 static int argument_callback_for_underlay_vdev(const char * key __rte_unused,
 			const char * value,
-			void * extra
-	)
+			void * extra)
 {
 	strcpy(extra,value);
 	return 0;
@@ -89,6 +208,17 @@ static int argument_callback_for_underlay_vlan(const char * key __rte_unused,
 	*(uint16_t*)extra=(uint16_t)atoi(value);
 	return 0;
 }
+static uint16_t vxlan_pmd_rx_burst(void *queue, struct rte_mbuf **bufs, uint16_t nb_bufs)
+{
+	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)queue;
+	return rte_eth_rx_burst(internals->underlay_port,0,bufs,nb_bufs);
+}
+static uint16_t vxlan_pmd_tx_burst(void *queue, struct rte_mbuf **bufs, uint16_t nb_bufs)
+{
+	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)queue;
+	return rte_eth_tx_burst(internals->underlay_port,0,bufs,nb_bufs);
+}
+
 static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 {
 	int rc;
@@ -102,7 +232,7 @@ static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 	uint8_t underlay_port=-1;
 	
 	struct rte_eth_dev_info dev_info;
-	struct rte_eth_conf     port_conf;
+	
 	struct rte_eth_dev *    eth_dev;
 	struct rte_eth_dev_data * eth_dev_data;
 	struct vxlan_pmd_internal * internals;
@@ -132,6 +262,7 @@ static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 		VXLAN_PMD_LOG("invalid argument for vxlan pmd device\n");
 		return -3;
 	}
+	#if 0
 	/*0 preserver mempool for underlay device*/
 	if(!g_vxlan_pmd_pktpool)
 		g_vxlan_pmd_pktpool=rte_pktmbuf_pool_create("vxlan_pmd_pktpool",
@@ -144,6 +275,7 @@ static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 		VXLAN_PMD_LOG("can not perserve pkt pool for vxlan pmd\n");
 		return -4;
 	}
+	#endif
 	/*1 register the underlay dev*/
 	rc=rte_eth_dev_attach(underlay_dev_params,&underlay_port);
 	if(rc){
@@ -165,6 +297,7 @@ static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 		VXLAN_PMD_LOG("underlay port %d does not support DEV_TX_OFFLOAD_VLAN_INSERT nic offload\n",underlay_port);
 		goto error_underlay_dev_detach;
 	}
+	#if 0
 	/*3 configure the underlay port right now*/
 	memset(&port_conf,0x0,sizeof(struct rte_eth_conf));
 	port_conf.rxmode.mq_mode=ETH_MQ_RX_NONE;
@@ -198,7 +331,7 @@ static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 		VXLAN_PMD_LOG("can not setup tx queue for underlay port %d\n",underlay_port);
 		goto error_underlay_dev_detach;
 	}
-	
+	#endif
 	/*5.register overlay device*/
 	eth_dev_data=rte_zmalloc(NULL,sizeof(struct rte_eth_dev_data),64);
 	if(!eth_dev_data){
@@ -231,7 +364,9 @@ static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 	eth_dev_data->mac_addrs=&internals->pmd_mac;
 	eth_dev_data->dev_flags=RTE_ETH_DEV_DETACHABLE;
 	eth_dev->data=eth_dev_data;
-
+	eth_dev->dev_ops=&dev_ops;
+	eth_dev->rx_pkt_burst=vxlan_pmd_rx_burst;
+	eth_dev->tx_pkt_burst=vxlan_pmd_tx_burst;
 	VXLAN_PMD_LOG("underlay port %d: %02x:%02x:%02x:%02x:%02x:%02x\n",underlay_port,
 		internals->local_mac[0],
 		internals->local_mac[1],
@@ -239,7 +374,7 @@ static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 		internals->local_mac[3],
 		internals->local_mac[4],
 		internals->local_mac[5]);
-	VXLAN_PMD_LOG("overlay port %d: %02x:%02x:%02x:%02x:%02x:%02x\n",eth_dev->data->port_id,
+	VXLAN_PMD_LOG("overlay  port %d: %02x:%02x:%02x:%02x:%02x:%02x\n",eth_dev->data->port_id,
 		internals->pmd_mac.addr_bytes[0],
 		internals->pmd_mac.addr_bytes[1],
 		internals->pmd_mac.addr_bytes[2],
@@ -267,11 +402,22 @@ static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 static int vxlan_pmd_remove(struct rte_vdev_device *dev)
 {
 	struct rte_eth_dev * eth_dev=NULL;
+	struct vxlan_pmd_internal * internals;
 	if(!dev)
 		return -1;
 	eth_dev=rte_eth_dev_allocated(rte_vdev_device_name(dev));
 	if(!eth_dev)
 		return -2;
+	internals=(struct vxlan_pmd_internal*)eth_dev->data->dev_private;
+	{
+			int release_rc;
+			char dev_name[128];
+			rte_eth_dev_stop(internals->underlay_port);
+			rte_eth_dev_close(internals->underlay_port);
+			release_rc=rte_eth_dev_detach(internals->underlay_port,dev_name);
+			if(release_rc)
+				VXLAN_PMD_LOG("error occurs during releasing %s \n",dev_name);
+	}
 	rte_free(eth_dev->data->dev_private);
 	rte_free(eth_dev->data);
 	rte_eth_dev_release_port(eth_dev);
