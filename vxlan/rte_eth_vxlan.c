@@ -18,14 +18,9 @@ Copyright (c) 2017 Jie Zheng
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#define VXLAN_DEBUG
+#include "vxlan_trivial_stack.h"
 
-#if defined(VXLAN_DEBUG)
-#define VXLAN_PMD_LOG(format,...) \
-	printf("[VXLAN_PMD]: "format,##__VA_ARGS__)
-#else
-#define VXLAN_PMD_LOG(format,...)
-#endif
+
 
 struct vxlan_pmd_internal{
 	uint8_t underlay_port;
@@ -93,6 +88,12 @@ static int vxlan_pmd_device_configure(struct rte_eth_dev *dev)
 	rc=rte_eth_dev_configure(internals->underlay_port,1,1,&port_conf);
 	if(rc<0){
 		VXLAN_PMD_LOG("can not configure underlay port %d\n",internals->underlay_port);
+		return -1;
+	}
+	/*reset initial mtu*/
+	rc=rte_eth_dev_set_mtu(internals->underlay_port,1600);
+	if(rc<0){
+		VXLAN_PMD_LOG("error occurs during setup mtu for underlay port %d\n",internals->underlay_port);
 		return -1;
 	}
 	return 0;
@@ -173,6 +174,11 @@ static void vxlan_pmd_stats_reset(struct rte_eth_dev *dev)
 	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)dev->data->dev_private;
 	rte_eth_stats_reset(internals->underlay_port);
 }
+static int vxlan_pmd_mtu_set(struct rte_eth_dev *dev, uint16_t mtu)
+{
+	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)dev->data->dev_private;
+	return rte_eth_dev_set_mtu(internals->underlay_port,mtu+100);/*assume additional 100 is enough*/
+}
 
 static struct eth_dev_ops dev_ops={
 	.dev_start=vxlan_pmd_device_start,
@@ -184,6 +190,7 @@ static struct eth_dev_ops dev_ops={
 	.link_update=vxlan_pmd_link_update,
 	.stats_get=vxlan_pmd_stats_get,
 	.stats_reset=vxlan_pmd_stats_reset,
+	.mtu_set=vxlan_pmd_mtu_set,
 	
 };
 static int argument_callback_for_underlay_vdev(const char * key __rte_unused,
@@ -211,7 +218,13 @@ static int argument_callback_for_underlay_vlan(const char * key __rte_unused,
 static uint16_t vxlan_pmd_rx_burst(void *queue, struct rte_mbuf **bufs, uint16_t nb_bufs)
 {
 	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)queue;
-	return rte_eth_rx_burst(internals->underlay_port,0,bufs,nb_bufs);
+	int rc=rte_eth_rx_burst(internals->underlay_port,0,bufs,nb_bufs);
+	if(rc){
+		int idx=0;
+		for(idx=0;idx<rc;idx++)
+			printf("packet type:%x\n",bufs[idx]->packet_type);
+	}
+	return rc;
 }
 static uint16_t vxlan_pmd_tx_burst(void *queue, struct rte_mbuf **bufs, uint16_t nb_bufs)
 {

@@ -47,7 +47,7 @@ LIBABIVER := 1
 #
 # all source are stored in SRCS-y
 #
-SRCS-$(CONFIG_RTE_LIBRTE_PMD_VXLAN) += rte_eth_vxlan.c
+SRCS-$(CONFIG_RTE_LIBRTE_PMD_VXLAN) += rte_eth_vxlan.c vxlan_trivial_stack.c
 
 #
 # Export include files
