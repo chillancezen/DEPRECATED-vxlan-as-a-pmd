@@ -22,14 +22,7 @@ Copyright (c) 2017 Jie Zheng
 
 
 
-struct vxlan_pmd_internal{
-	uint8_t underlay_port;
-	uint8_t local_mac[6];
-	uint8_t remote_mac[6];
-	struct ether_addr pmd_mac;
-	uint32_t local_ip_as_be;
-	uint32_t remote_ip_as_be;
-};
+
 #if 0
 #define DEFAULT_RX_DESCRIPTORS 1024
 #define DEFAULT_TX_DESCRIPTORS 1024
@@ -96,6 +89,7 @@ static int vxlan_pmd_device_configure(struct rte_eth_dev *dev)
 		VXLAN_PMD_LOG("error occurs during setup mtu for underlay port %d\n",internals->underlay_port);
 		return -1;
 	}
+	/*todo:preserve hardware specific interface to configue underlay device*/
 	return 0;
 }
 static void vxlan_pmd_device_info_get(struct rte_eth_dev *dev __rte_unused,struct rte_eth_dev_info *dev_info)
@@ -179,10 +173,16 @@ static int vxlan_pmd_mtu_set(struct rte_eth_dev *dev, uint16_t mtu)
 	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)dev->data->dev_private;
 	return rte_eth_dev_set_mtu(internals->underlay_port,mtu+100);/*assume additional 100 is enough*/
 }
+static void vxlan_pmd_dev_close(struct rte_eth_dev *dev)
+{
+	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)dev->data->dev_private;
+	return rte_eth_dev_close(internals->underlay_port);
+}
 
 static struct eth_dev_ops dev_ops={
 	.dev_start=vxlan_pmd_device_start,
 	.dev_stop=vxlan_pmd_device_stop,
+	.dev_close=vxlan_pmd_dev_close,
 	.dev_configure=vxlan_pmd_device_configure,
 	.dev_infos_get=vxlan_pmd_device_info_get,
 	.rx_queue_setup=vxlan_pmd_rx_queue_setup,
@@ -218,13 +218,41 @@ static int argument_callback_for_underlay_vlan(const char * key __rte_unused,
 static uint16_t vxlan_pmd_rx_burst(void *queue, struct rte_mbuf **bufs, uint16_t nb_bufs)
 {
 	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)queue;
+	
+	struct packet_set raw_set={
+		.iptr=0,
+	};
+	struct packet_set arp_set={
+		.iptr=0,
+	};
+	struct packet_set icmp_set={
+		.iptr=0,
+	};
+	struct packet_set vxlan_set={
+		.iptr=0,
+	};
+	struct packet_set drop_set={
+		.iptr=0,
+	};
+	raw_set.iptr=rte_eth_rx_burst(internals->underlay_port,0,raw_set.set,VXLAN_PMD_MIN(nb_bufs,MAX_PACKETS_IN_SET));
+	
+	do_packet_selection_common(internals,
+		&raw_set,
+		&arp_set,
+		&icmp_set,
+		&vxlan_set,
+		&drop_set,
+		NULL);
+	
+	#if 0
 	int rc=rte_eth_rx_burst(internals->underlay_port,0,bufs,nb_bufs);
 	if(rc){
 		int idx=0;
 		for(idx=0;idx<rc;idx++)
 			printf("packet type:%x\n",bufs[idx]->packet_type);
 	}
-	return rc;
+	#endif
+	return 0;
 }
 static uint16_t vxlan_pmd_tx_burst(void *queue, struct rte_mbuf **bufs, uint16_t nb_bufs)
 {
@@ -363,6 +391,7 @@ static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 	internals->underlay_port=underlay_port;
 	internals->remote_ip_as_be=remote_ip;
 	internals->local_ip_as_be=local_ip;
+	internals->underlay_vlan=underlay_vlan;
 	rte_eth_macaddr_get(underlay_port,&internals->pmd_mac);
 	rte_memcpy(internals->local_mac,internals->pmd_mac.addr_bytes,6);
 	/*to generate virtual pmd's mac address,we extract 2nd ,3rd byte of the 
