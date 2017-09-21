@@ -16,16 +16,18 @@ Copyright (c) 2017 Jie Zheng
 #endif
 
 struct vxlan_pmd_internal{
+	uint8_t arp_initilized;
 	uint8_t underlay_port;
 	uint8_t local_mac[6];
 	uint8_t remote_mac[6];
-	uint16_t underlay_vlan;
 	struct ether_addr pmd_mac;
+	uint16_t underlay_vlan;
 	uint32_t local_ip_as_be;
 	uint32_t remote_ip_as_be;
+	uint32_t vni;
 };
 
-
+#define VXLAN_UDP_PORT 0xb512 
 #define MAX_PACKETS_IN_SET 64
 #define VXLAN_PMD_MIN(a,b) (((a)<(b))?(a):(b))
 
@@ -44,13 +46,22 @@ struct packet_set{
 	(set_ptr)->iptr++; \
 }
 
-void do_packet_selection_common(struct vxlan_pmd_internal * internals,
+void do_packet_selection_generic(struct vxlan_pmd_internal * internals,
 		struct packet_set * raw_set,
 		struct packet_set * arp_set,
 		struct packet_set * icmp_set,
 		struct packet_set * vxlan_set,
-		struct packet_set * drop_set,
-		void * extra);
+		struct packet_set * drop_set);
+
+void arp_packet_process(struct vxlan_pmd_internal * internals,
+			struct packet_set * arp_set,
+			struct packet_set * drop_set);
+
+void icmp_packet_process(struct vxlan_pmd_internal * internals,
+			struct packet_set * icmp_set,
+			struct packet_set * drop_set);
+
+
 
 
 #endif

@@ -34,7 +34,7 @@ Copyright (c) 2017 Jie Zheng
 #define VXLAN_PMD_ARG_LOCAL_IP "local_ip"
 #define VXLAN_PMD_ARG_REMOTE_IP "remote_ip"
 #define VXLAN_PMD_ARG_UNDERLAY_VLAN "underlay_vlan" /*optional,default is 0*/
-
+#define VXLAN_PMD_ARG_VNI "vni"
 static uint16_t pmd_mac_counter=0x1;
 
 /*here for security reason, we do not create per-device mempool
@@ -47,6 +47,7 @@ static const char * valid_arguments[]={
 	VXLAN_PMD_ARG_UNDERLAY_DEV,
 	VXLAN_PMD_ARG_LOCAL_IP,
 	VXLAN_PMD_ARG_REMOTE_IP,
+	VXLAN_PMD_ARG_VNI,
 	NULL,
 };
 
@@ -215,6 +216,15 @@ static int argument_callback_for_underlay_vlan(const char * key __rte_unused,
 	*(uint16_t*)extra=(uint16_t)atoi(value);
 	return 0;
 }
+
+static int argument_callback_for_underlay_vni(const char * key __rte_unused,
+			const char * value,
+			void * extra)
+{
+	*(uint32_t*)extra=(uint32_t)atoi(value);
+	return 0;
+}
+
 static uint16_t vxlan_pmd_rx_burst(void *queue, struct rte_mbuf **bufs, uint16_t nb_bufs)
 {
 	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)queue;
@@ -236,14 +246,18 @@ static uint16_t vxlan_pmd_rx_burst(void *queue, struct rte_mbuf **bufs, uint16_t
 	};
 	raw_set.iptr=rte_eth_rx_burst(internals->underlay_port,0,raw_set.set,VXLAN_PMD_MIN(nb_bufs,MAX_PACKETS_IN_SET));
 	
-	do_packet_selection_common(internals,
+	do_packet_selection_generic(internals,
 		&raw_set,
 		&arp_set,
 		&icmp_set,
 		&vxlan_set,
-		&drop_set,
-		NULL);
+		&drop_set);
+	arp_packet_process(internals,
+		&arp_set,
+		&drop_set);
 	
+	
+
 	#if 0
 	int rc=rte_eth_rx_burst(internals->underlay_port,0,bufs,nb_bufs);
 	if(rc){
@@ -271,11 +285,11 @@ static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 	uint16_t underlay_vlan=0;
 	struct rte_kvargs * kvlist=NULL;
 	uint8_t underlay_port=-1;
+	uint32_t vni=0;
+	struct rte_eth_dev_info     dev_info;
 	
-	struct rte_eth_dev_info dev_info;
-	
-	struct rte_eth_dev *    eth_dev;
-	struct rte_eth_dev_data * eth_dev_data;
+	struct rte_eth_dev        * eth_dev;
+	struct rte_eth_dev_data   * eth_dev_data;
 	struct vxlan_pmd_internal * internals;
 	memset(underlay_dev_params,0x0,sizeof(underlay_dev_params));
 	
@@ -298,8 +312,13 @@ static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 			VXLAN_PMD_ARG_UNDERLAY_VLAN,
 			argument_callback_for_underlay_vlan,
 			&underlay_vlan);
+	rte_kvargs_process(kvlist,
+			VXLAN_PMD_ARG_VNI,
+			argument_callback_for_underlay_vni,
+			&vni);
+	
 	rte_kvargs_free(kvlist);
-	if(!underlay_dev_params[0]||!remote_ip||!local_ip){
+	if(!underlay_dev_params[0]||!remote_ip||!local_ip||!vni){
 		VXLAN_PMD_LOG("invalid argument for vxlan pmd device\n");
 		return -3;
 	}
@@ -392,6 +411,8 @@ static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 	internals->remote_ip_as_be=remote_ip;
 	internals->local_ip_as_be=local_ip;
 	internals->underlay_vlan=underlay_vlan;
+	internals->vni=vni;
+	internals->arp_initilized=0;
 	rte_eth_macaddr_get(underlay_port,&internals->pmd_mac);
 	rte_memcpy(internals->local_mac,internals->pmd_mac.addr_bytes,6);
 	/*to generate virtual pmd's mac address,we extract 2nd ,3rd byte of the 
@@ -475,5 +496,6 @@ RTE_PMD_REGISTER_PARAM_STRING(net_vxlan,
 	VXLAN_PMD_ARG_UNDERLAY_DEV "=<pci-bus-addr>"
 	VXLAN_PMD_ARG_LOCAL_IP "=<ip-addr> "
 	VXLAN_PMD_ARG_REMOTE_IP "=<ip-addr> "
-	VXLAN_PMD_ARG_UNDERLAY_VLAN "=<vlan-id>");
+	VXLAN_PMD_ARG_UNDERLAY_VLAN "=<vlan-id>"
+	VXLAN_PMD_ARG_VNI "=<vni>");
 
