@@ -252,10 +252,8 @@ static uint16_t vxlan_pmd_rx_burst(void *queue, struct rte_mbuf **bufs, uint16_t
 		&icmp_set,
 		&vxlan_set,
 		&drop_set);
-	arp_packet_process(internals,
-		&arp_set,
-		&drop_set);
-	
+	arp_packet_process(internals,&arp_set,&drop_set);
+	icmp_packet_process(internals,&icmp_set,&drop_set);
 	
 
 	#if 0

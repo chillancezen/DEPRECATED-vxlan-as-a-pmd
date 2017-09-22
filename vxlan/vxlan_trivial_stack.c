@@ -8,6 +8,7 @@ Copyright (c) 2017 Jie Zheng
 #include <rte_ip.h>
 #include <rte_udp.h>
 #include <rte_arp.h>
+#include <rte_icmp.h>
 void do_packet_selection_generic(struct vxlan_pmd_internal * internals,
 		struct packet_set * raw_set,
 		struct packet_set * arp_set,
@@ -85,16 +86,12 @@ void arp_packet_process(struct vxlan_pmd_internal * internals,
 		mbuf=arp_set->set[idx];
 		ether_hdr=rte_pktmbuf_mtod(mbuf,struct ether_hdr*);
 		arp_hdr=(struct arp_hdr*)(ether_hdr+1);
-		
-		
 		if(arp_hdr->arp_data.arp_tip!=internals->local_ip_as_be) goto drop;
-		
-	
 		/*arp snooping to determine the remote endpoint's mac address*/
 		{
 			if(arp_hdr->arp_data.arp_sip==internals->remote_ip_as_be){
-
 				rte_memcpy(internals->remote_mac,arp_hdr->arp_data.arp_sha.addr_bytes,6);
+				internals->arp_initilized=1;
 			}
 		}
 		/*generate arp response packet*/
@@ -131,6 +128,58 @@ void icmp_packet_process(struct vxlan_pmd_internal * internals,
 			struct packet_set * icmp_set,
 			struct packet_set * drop_set)
 {
-
+	int rc;
+	int idx=0;
+	struct packet_set respond_set={
+		.iptr=0,
+	};
+	struct rte_mbuf  * mbuf;
+	struct ether_hdr * ether_hdr;
+	struct ipv4_hdr  * ip_hdr;
+	struct icmp_hdr  * icmp_hdr;
+	uint32_t csum=0;
+	for(idx=0;idx<icmp_set->iptr;idx++){
+		mbuf=icmp_set->set[idx];
+		ether_hdr=rte_pktmbuf_mtod(mbuf,struct ether_hdr*);
+		ip_hdr=(struct ipv4_hdr*)(ether_hdr+1);
+		if(ip_hdr->dst_addr!=internals->local_ip_as_be) goto drop;
+		icmp_hdr=(struct icmp_hdr *)((ip_hdr->version_ihl&0xf)*4+(uint8_t*)ip_hdr);
+		if(icmp_hdr->icmp_type!=IP_ICMP_ECHO_REQUEST) goto drop;
+		/*update icmp data */
+		icmp_hdr->icmp_type=IP_ICMP_ECHO_REPLY;
+		csum=(~(icmp_hdr->icmp_cksum))&0xffff;
+		csum+=0xfff7;
+		while(csum>>16)
+			csum=(csum&0xffff)+(csum>>16);
+		icmp_hdr->icmp_cksum=(~csum)&0xffff;
+		/*update ip data*/
+		ip_hdr->dst_addr=ip_hdr->src_addr;
+		ip_hdr->src_addr=internals->local_ip_as_be;
+		ip_hdr->time_to_live=64;
+		ip_hdr->hdr_checksum=0;
+		mbuf->l2_len=sizeof(struct ether_hdr);
+		mbuf->l3_len=(ip_hdr->version_ihl&0xf)<<2;
+		mbuf->ol_flags=PKT_TX_IPV4|PKT_TX_IP_CKSUM;
+		if(internals->underlay_vlan){
+			mbuf->vlan_tci=internals->underlay_vlan;
+			mbuf->ol_flags|=PKT_TX_VLAN_PKT;
+		}
+		rte_memcpy(ether_hdr->d_addr.addr_bytes,
+					ether_hdr->s_addr.addr_bytes,
+					6);
+		rte_memcpy(ether_hdr->s_addr.addr_bytes,
+					internals->local_mac,
+					6);
+		push_packet_into_set(&respond_set,mbuf);
+		continue;
+		drop:
+			push_packet_into_set(drop_set,mbuf);
+			continue;
+	}
+	if(respond_set.iptr){
+		rc=rte_eth_tx_burst(internals->underlay_port,0,respond_set.set,respond_set.iptr);
+		for(idx=rc;idx<respond_set.iptr;idx++)
+			push_packet_into_set(drop_set,respond_set.set[idx]);
+	}
 }
 
