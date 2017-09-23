@@ -183,3 +183,110 @@ void icmp_packet_process(struct vxlan_pmd_internal * internals,
 	}
 }
 
+void vxlan_packet_process(struct vxlan_pmd_internal* internals __rte_unused,
+			struct packet_set * vxlan_set,/*since we know mbufs can accommodate all the pkts in vxlan_set*/
+			struct rte_mbuf ** mbufs)
+{
+	int idx=0;
+	for(idx=0;idx<vxlan_set->iptr;idx++)
+		mbufs[idx]=vxlan_set->set[idx];
+}
+
+void drop_packet_process(struct vxlan_pmd_internal * internals __rte_unused,
+			struct packet_set * drop_set)
+{
+	int idx=0;
+	for(idx=0;idx<drop_set->iptr;idx++){
+		rte_pktmbuf_free(drop_set->set[idx]);
+	}
+}
+
+void generate_arp_request(struct vxlan_pmd_internal * internals,
+			struct rte_mbuf   * mbuf)
+{
+	struct ether_hdr * ether_hdr;
+	struct arp_hdr   * arp_hdr;
+	rte_pktmbuf_reset(mbuf);
+	rte_pktmbuf_append(mbuf,64);
+
+	ether_hdr=rte_pktmbuf_mtod(mbuf,struct ether_hdr*);
+	memset(ether_hdr,0x0,64);
+	rte_memcpy(ether_hdr->d_addr.addr_bytes,
+				"\xff\xff\xff\xff\xff\xff",6);
+	rte_memcpy(ether_hdr->s_addr.addr_bytes,
+				internals->local_mac,6);
+	ether_hdr->ether_type=0x0608;
+	arp_hdr=(struct arp_hdr*)(ether_hdr+1);
+	arp_hdr->arp_hrd=0x0100;
+	arp_hdr->arp_pro=0x0008;
+	arp_hdr->arp_hln=0x06;
+	arp_hdr->arp_pln=0x04;
+	arp_hdr->arp_op=0x0100;
+
+	arp_hdr->arp_data.arp_sip=internals->local_ip_as_be;
+	arp_hdr->arp_data.arp_tip=internals->remote_ip_as_be;
+	rte_memcpy(arp_hdr->arp_data.arp_sha.addr_bytes,
+				internals->local_mac,6);
+	rte_memcpy(arp_hdr->arp_data.arp_tha.addr_bytes,
+				"\x00\x00\x00\x00\x00\x00",6);
+	if(internals->underlay_vlan){
+		mbuf->vlan_tci=internals->underlay_vlan;
+		mbuf->ol_flags=PKT_TX_VLAN_PKT;
+	}
+}
+void vxlan_encapsulate(struct vxlan_pmd_internal * internals,
+				struct rte_mbuf ** mbufs,
+				int nr_mbuf)
+{
+
+	int idx=0;
+	struct ether_hdr  * ether_hdr;
+	struct ipv4_hdr   * ip_hdr;
+	struct udp_hdr    * udp_hdr;
+	struct vxlan_hdr  * vxlan_hdr;
+	for(idx=0;idx<nr_mbuf;idx++){
+		rte_pktmbuf_prepend(mbufs[idx],50);//it's supposed to be always successful
+		ether_hdr=rte_pktmbuf_mtod(mbufs[idx],struct ether_hdr*);
+
+		/*fill ethernet data*/
+		rte_memcpy(ether_hdr->d_addr.addr_bytes,internals->remote_mac,6);
+		rte_memcpy(ether_hdr->s_addr.addr_bytes,internals->local_mac,6);
+		ether_hdr->ether_type=0x0008;
+
+		/*fill IP layer data*/
+		ip_hdr=(struct ipv4_hdr*)(ether_hdr+1);
+		ip_hdr->version_ihl=0x45;
+		ip_hdr->type_of_service=0x0;
+		ip_hdr->total_length=mbufs[idx]->pkt_len-14;
+		ip_hdr->total_length=SWAP_ORDER16(ip_hdr->total_length);
+		ip_hdr->packet_id=internals->ip_identity++;
+		ip_hdr->packet_id=SWAP_ORDER16(ip_hdr->packet_id);
+		ip_hdr->fragment_offset=0x0040;
+		ip_hdr->time_to_live=0x40;
+		ip_hdr->next_proto_id=0x11;
+		ip_hdr->hdr_checksum=0x0;
+		ip_hdr->src_addr=internals->local_ip_as_be;
+		ip_hdr->dst_addr=internals->remote_ip_as_be;
+
+		udp_hdr=(struct udp_hdr*)(ip_hdr+1);
+		udp_hdr->dgram_cksum=0;
+		udp_hdr->dgram_len=mbufs[idx]->pkt_len-34;
+		udp_hdr->dgram_len=SWAP_ORDER16(udp_hdr->dgram_len);
+		udp_hdr->dst_port=VXLAN_UDP_PORT;
+		udp_hdr->src_port=VXLAN_UDP_PORT;/*to-do:distribute src port more evenly*/
+
+		vxlan_hdr=(struct vxlan_hdr *)(udp_hdr+1);
+		vxlan_hdr->vx_flags=0x0008;
+		vxlan_hdr->vx_vni=internals->vni;
+		
+		mbufs[idx]->l2_len=14;
+		mbufs[idx]->l3_len=20;
+		mbufs[idx]->ol_flags=PKT_TX_IP_CKSUM|PKT_TX_IPV4;
+
+		if(internals->underlay_vlan){
+			mbufs[idx]->vlan_tci=internals->underlay_vlan;
+			mbufs[idx]->ol_flags|=PKT_TX_VLAN_PKT;
+		}
+		
+	}
+}

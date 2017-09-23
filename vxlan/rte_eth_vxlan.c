@@ -11,7 +11,7 @@ Copyright (c) 2017 Jie Zheng
 #include <rte_spinlock.h>
 #include <rte_cycles.h>
 #include <rte_mempool.h>
-
+#include <rte_cycles.h>
 
 #include <stdio.h>
 #include <sys/socket.h>
@@ -254,22 +254,33 @@ static uint16_t vxlan_pmd_rx_burst(void *queue, struct rte_mbuf **bufs, uint16_t
 		&drop_set);
 	arp_packet_process(internals,&arp_set,&drop_set);
 	icmp_packet_process(internals,&icmp_set,&drop_set);
+	vxlan_packet_process(internals,&vxlan_set,bufs);
+	drop_packet_process(internals,&drop_set);
 	
-
-	#if 0
-	int rc=rte_eth_rx_burst(internals->underlay_port,0,bufs,nb_bufs);
-	if(rc){
-		int idx=0;
-		for(idx=0;idx<rc;idx++)
-			printf("packet type:%x\n",bufs[idx]->packet_type);
-	}
-	#endif
-	return 0;
+	return vxlan_set.iptr;
 }
 static uint16_t vxlan_pmd_tx_burst(void *queue, struct rte_mbuf **bufs, uint16_t nb_bufs)
 {
+	uint64_t cur_tsc,diff_tsc;
+	int nr_sent=0;
 	struct vxlan_pmd_internal * internals=(struct vxlan_pmd_internal*)queue;
-	return rte_eth_tx_burst(internals->underlay_port,0,bufs,nb_bufs);
+	if(unlikely(!nb_bufs))
+		return 0;
+	if(unlikely(!internals->arp_initilized)){
+		cur_tsc=rte_rdtsc();
+		diff_tsc=cur_tsc-internals->last_arp_sent;
+		if((diff_tsc*5)>internals->cpu_HZ){/*send arp duration must exceed 200ms*/
+			generate_arp_request(internals,bufs[0]);
+			nr_sent=rte_eth_tx_burst(internals->underlay_port,0,bufs,1);
+			if(nr_sent)
+				internals->last_arp_sent=rte_rdtsc();
+		}
+	}else{
+		
+		vxlan_encapsulate(internals,bufs,nb_bufs);
+		nr_sent=rte_eth_tx_burst(internals->underlay_port,0,bufs,nb_bufs);
+	}
+	return nr_sent;
 }
 
 static int vxlan_pmd_probe(struct rte_vdev_device *dev)
@@ -409,8 +420,10 @@ static int vxlan_pmd_probe(struct rte_vdev_device *dev)
 	internals->remote_ip_as_be=remote_ip;
 	internals->local_ip_as_be=local_ip;
 	internals->underlay_vlan=underlay_vlan;
-	internals->vni=vni;
+	internals->vni=VNI_SWAP_ORDER(vni);
+	internals->ip_identity=0;
 	internals->arp_initilized=0;
+	internals->cpu_HZ=rte_get_tsc_hz();
 	rte_eth_macaddr_get(underlay_port,&internals->pmd_mac);
 	rte_memcpy(internals->local_mac,internals->pmd_mac.addr_bytes,6);
 	/*to generate virtual pmd's mac address,we extract 2nd ,3rd byte of the 
