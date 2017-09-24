@@ -9,6 +9,7 @@ Copyright (c) 2017 Jie Zheng
 #include <rte_udp.h>
 #include <rte_arp.h>
 #include <rte_icmp.h>
+
 void do_packet_selection_generic(struct vxlan_pmd_internal * internals,
 		struct packet_set * raw_set,
 		struct packet_set * arp_set,
@@ -75,7 +76,6 @@ void arp_packet_process(struct vxlan_pmd_internal * internals,
 			struct packet_set * drop_set)
 {
 	int idx=0;
-	int rc;
 	struct packet_set respond_set={
 		.iptr=0,
 	};
@@ -118,9 +118,8 @@ void arp_packet_process(struct vxlan_pmd_internal * internals,
 	}
 	/*not safe to trasmit packets out*/
 	if(respond_set.iptr){
-		rc=rte_eth_tx_burst(internals->underlay_port,0,respond_set.set,respond_set.iptr);
-		for(idx=rc;idx<respond_set.iptr;idx++)
-			push_packet_into_set(drop_set,respond_set.set[idx]);
+		for(idx=0;idx<respond_set.iptr;idx++)
+			vxlan_pmd_xmit_consume(internals,respond_set.set[idx]);
 	}
 }
 
@@ -128,7 +127,7 @@ void icmp_packet_process(struct vxlan_pmd_internal * internals,
 			struct packet_set * icmp_set,
 			struct packet_set * drop_set)
 {
-	int rc;
+	
 	int idx=0;
 	struct packet_set respond_set={
 		.iptr=0,
@@ -177,9 +176,8 @@ void icmp_packet_process(struct vxlan_pmd_internal * internals,
 			continue;
 	}
 	if(respond_set.iptr){
-		rc=rte_eth_tx_burst(internals->underlay_port,0,respond_set.set,respond_set.iptr);
-		for(idx=rc;idx<respond_set.iptr;idx++)
-			push_packet_into_set(drop_set,respond_set.set[idx]);
+		for(idx=0;idx<respond_set.iptr;idx++)
+			vxlan_pmd_xmit_consume(internals,respond_set.set[idx]);
 	}
 }
 
@@ -201,6 +199,35 @@ void drop_packet_process(struct vxlan_pmd_internal * internals __rte_unused,
 	}
 }
 
+void post_rx_process(struct vxlan_pmd_internal* internals)
+{
+	uint64_t cur_tsc;
+	uint64_t diff_tsc;
+	int rc=0;
+	int idx=0;
+	if(!internals->xmit_pending_index)
+		return ;
+
+	
+	if(rte_spinlock_trylock(&internals->xmit_guard)){
+		rc=rte_eth_tx_burst(internals->underlay_port,
+					0,
+					internals->mbufs_pending,
+					internals->xmit_pending_index);
+		for(idx=rc;idx<internals->xmit_pending_index;idx++)
+			rte_pktmbuf_free(internals->mbufs_pending[idx]);
+		internals->xmit_pending_index=0;
+		rte_spinlock_unlock(&internals->xmit_guard);
+	}else{
+		cur_tsc=rte_rdtsc();
+		diff_tsc=cur_tsc-internals->tsc_1st_try;
+		if(unlikely(diff_tsc>(internals->cpu_HZ*XMIT_PENDING_SECONDS))){
+			for(idx=0;idx<internals->xmit_pending_index;idx++)
+				rte_pktmbuf_free(internals->mbufs_pending[idx]);
+			internals->xmit_pending_index=0;
+		}
+	}
+}
 void generate_arp_request(struct vxlan_pmd_internal * internals,
 			struct rte_mbuf   * mbuf)
 {
